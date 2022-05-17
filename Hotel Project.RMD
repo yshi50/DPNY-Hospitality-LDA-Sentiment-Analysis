@@ -1,0 +1,842 @@
+---
+title: "Hotel Project Preprocess"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+```
+
+# Packages Reference
+
+```{r, echo = TRUE}
+rm(list = ls())
+
+library(readxl)
+library(topicmodels)
+library(scales)
+library(ldatuning)
+library(fastDummies)
+library(ltm)
+library(tm)
+library(dplyr)
+library(lavaan)
+library(quanteda)
+library(tidytext)
+library(DescTools)            
+library(stringr)
+library(topicmodels)
+library(quanteda)
+library(tidyr)
+library(stopwords)
+library(igraph)
+library(quanteda)
+library(ggraph)
+library(seededlda)
+library(SnowballC)
+library(LSX)
+library(reshape2)
+library(textcat)
+library(cld2)
+```
+
+# Read Raw Data
+
+```{r}
+data.1 = readxl::read_excel("Marriott_Responses_Export_2019.xlsx", col_names = TRUE, skip = 1)
+data.2 = readxl::read_excel("SALT_ReviewSites_Responses_Year 2019.xlsx", col_names = TRUE, skip = 1)
+sentiment = as.data.frame(readLines('AFINN-111.txt')) %>% setNames("original")
+
+sentiment = sentiment %>% mutate(term = gsub("\t.*", "", original)) %>% mutate(score = gsub(".*\t", "", original)) %>% select(-original) %>% mutate(score = as.numeric(score)) %>% mutate(term = wordStem(term)) %>% distinct(term, .keep_all = TRUE)
+```
+
+# Preprocess Raw Data
+
+## 1. Delete Empty Columns
+
+```{r}
+super.preprocess = function(data){
+  flag = 0
+  j = 1
+  
+  while ((j - flag) <= dim(data)[2]) {
+    uniqueness = unique(data[, j - flag])
+    if (length(uniqueness) == 1 && all(is.na(uniqueness))){
+      data = data[, -(j - flag)]
+      flag = flag + 1
+    } # Detect Columns with only NA
+    j = j + 1
+  }
+  return(data)
+} # Delete Empty Columns
+
+test.1 = super.preprocess(data.1) # Marriott Without Empty Columns
+
+test.2 = super.preprocess(data.2) # Hilton Without Empty Columns
+```
+
+# Raw Text Preprocess
+
+## 1. Language Detection
+
+#### Marriott
+
+There are comments that are in different languages other than English, we need to focus only on English.
+
+```{r, echo = TRUE}
+unique(test.1$`Survey language`)
+# Different Languages
+```
+
+There are also three kinds of English among them.
+
+```{r, echo = TRUE}
+unique(test.1$`Survey language`[which(sapply(test.1$`Survey language`, function(x) any(grepl("English", x))))])
+# Different English Languages
+
+book.1 = data.frame(index = which(sapply(test.1$`Survey language`, function(x) any(grepl("English", x)))), comment = test.1$`Overall Comment`[which(sapply(test.1$`Survey language`, function(x) any(grepl("English", x))))])
+# Only English Languages Extracted
+# Treat Each Comment as a Document
+book.1 = na.omit(book.1, cols = "comment") # Delete Empty Comments
+```
+
+#### Hilton
+
+This is a little difficult, there is no column that indicates the language of comments. We can use an external package to label each comment.
+
+```{r}
+book.2 = data.frame(index = 1:nrow(test.2), comment = test.2$Comment)
+
+book.2 = na.omit(book.2, cols = "comment") # Delete Empty Comments
+
+book.2 = book.2 %>% mutate(language.1 = textcat(book.2$comment), language.2 = cld2::detect_language(book.2$comment)) %>% filter(language.1 == "english" | language.2 == "en") %>% select(-language.1, -language.2)
+# Use External Packages to Detect English
+```
+
+## 2. Append Index
+
+Treat each comment as a document.
+
+Save the index so that we can reference back to the original comments easier.
+
+## 3. Delete Empty Comments.
+
+## 4. Remove Punctuation$^1$.
+
+The function will do it automatically. But one special case of ' and '.
+
+Reference: <https://www.rdocumentation.org/packages/tidytext/versions/0.3.2/topics/unnest_tokens>
+
+## 5. Case Conversion$^4$.
+
+The function will do it automatically.
+
+Reference: <https://www.rdocumentation.org/packages/tidytext/versions/0.3.2/topics/unnest_tokens>
+
+## 6. Tokenization.
+
+Reference: <https://www.rdocumentation.org/packages/tidytext/versions/0.3.2/topics/unnest_tokens>
+
+```{r}
+# Tokenization
+# Case Conversion
+# Remove Punctuation
+
+term.1 = book.1 %>% unnest_tokens(word, comment, to_lower = TRUE, strip_punct = TRUE) %>% count(index, word, sort = TRUE, name = "occur") %>% mutate(word = gsub("_", "", word)) %>% mutate(word = gsub("’", "'", word)) %>% mutate(word = gsub(",", "", word)) %>% mutate(word = gsub("\\.", "", word))
+# Special Case ’ and '
+
+term.2 = book.2 %>% unnest_tokens(word, comment, to_lower = TRUE, strip_punct = TRUE) %>% count(index, word, sort = TRUE, name = "occur") %>% mutate(word = gsub("_", "", word)) %>% mutate(word = gsub("’", "", word)) %>%  mutate(word = gsub(",", "", word)) %>% mutate(word = gsub("\\.", "", word))
+# Special Case _
+```
+
+## 7. Filter Stop Words$^3$.
+
+Reference: <https://github.com/quanteda/stopwords>
+
+```{r}
+their.stop = tibble(word = stopwords::stopwords("en", source = "snowball"))
+
+term.1 = anti_join(term.1, their.stop,
+                           by = "word")
+# Remove Stop Words
+
+term.2 = anti_join(term.2, their.stop,
+                           by = "word")
+# Remove Stop Words
+```
+
+## 8. Filter Number$^5$.
+
+Reference: <https://stringr.tidyverse.org/articles/regular-expressions.html#special-characters>
+
+```{r}
+term.1 = term.1  %>%
+  mutate(word = str_remove_all(word, "\\d+"))
+# Regular Expression
+# Filter Number
+
+term.1 = term.1 %>% filter(!word == "") %>%
+  filter(!word == ".")
+# Remove Empty
+# Remove Period
+# Was Generated by the Removal of Number
+
+term.2 = term.2  %>%
+  mutate(word = str_remove_all(word, "\\d+"))
+# Regular Expression
+# Filter Number
+
+term.2 = term.2 %>% filter(!word == "") %>%
+  filter(!word == ".")
+# Remove Empty
+# Remove Period
+# Was Generated by the Removal of Number
+```
+
+## 9. N-char Filter$^2$.
+
+This can be one of the tuning parameters.
+
+```{r}
+super.filter = function(data, threshold){
+  return(data[which(nchar(data$word) >= threshold), ])
+}
+# N-char Filter
+# Write it as a Function to Better Tune Later
+
+term.1 = super.filter(term.1, 3)
+term.2 = super.filter(term.2, 3)
+```
+
+## 10. Stemmer
+
+Reference: <https://cran.r-project.org/web/packages/SnowballC/index.html>
+
+```{r}
+# Snowball Stemmer
+term.1 = term.1 %>% mutate(word = wordStem(word))
+
+term.2 = term.2 %>% mutate(word = wordStem(word))
+```
+
+# Bag of Words Model
+
+```{r}
+term.bag.1 = term.1 %>% tidytext::cast_dfm(index, word, occur)
+head(term.bag.1)
+
+term.bag.2 = term.2 %>% tidytext::cast_dfm(index, word, occur)
+head(term.bag.2)
+```
+
+## 1. Remove Less Frequent Terms
+
+Important! Here we remove the terms that only appear in few documents, say $0.5%$ of the documents, it has nothing to do with its frequency in one given document.
+
+```{r}
+super.trim = function(data, doc.threshold, term.threshold = NULL){
+  return(dfm_trim(data, min_termfreq = term.threshold, min_docfreq = doc.threshold, docfreq_type = "prop"))
+}
+
+before.1 = term.bag.1@Dim[2]
+term.bag.1 = super.trim(term.bag.1, 0.005)
+# 0.5% is the Threshold
+term.bag.1 = dfm_subset(term.bag.1, ntoken(term.bag.1) > 0)
+# One Document Got Emptied After Deletion
+head(term.bag.1)
+
+before.2 = term.bag.2@Dim[2]
+term.bag.2 = super.trim(term.bag.2, 0.005)
+# 0.5% is the Threshold
+term.bag.2 = dfm_subset(term.bag.2, ntoken(term.bag.2) > 0)
+# One Document Got Emptied After Deletion
+head(term.bag.2)
+```
+
+```{r}
+# Number of Terms got Deleted
+cat(sprintf("\nBefore: %d \nAfter: %d \nDelete: %d\n", before.1, term.bag.1@Dim[2], before.1 - term.bag.1@Dim[2]))
+
+cat(sprintf("\nBefore: %d \nAfter: %d \nDelete: %d\n", before.2, term.bag.2@Dim[2], before.2 - term.bag.2@Dim[2]))
+```
+
+## 2. Term Frequency
+
+Calculate the term frequency.
+
+$$\text{TF}(t) = \frac{\text{Number of times term }t\text{ appears in the document}}{\text{Total number of terms in the document}}$$
+
+## 3. Inverse Document Frequency
+
+Calculate the inverse document frequency.
+
+$$\text{IDF}(t) = \frac{\text{Total number of documents}}{\text{Number of documents with term } t \text{ in}}$$
+
+## 4. TF-IDF
+
+Multiply them to get tf-idf as the weight.
+
+```{r}
+term.weighted.1 = dfm_tfidf(term.bag.1)
+# Weighted Matrix
+
+term.weighted.2 = dfm_tfidf(term.bag.2)
+# Weighted Matrix
+```
+
+# Topic Modeling
+
+Get some sense of the optimal topic number.
+
+```{r}
+result.1 = FindTopicsNumber(
+  term.bag.1,
+  topics = seq(from = 2, to = 7, by = 1),
+  metrics = c("CaoJuan2009", "Deveaud2014"),
+  method = "Gibbs",
+  mc.cores = 6L,
+  verbose = TRUE,
+  control = list(seed = 100)
+)
+
+FindTopicsNumber_plot(result.1)
+
+result.2 = FindTopicsNumber(
+  term.bag.2,
+  topics = seq(from = 2, to = 7, by = 1),
+  metrics = c("CaoJuan2009", "Deveaud2014"),
+  method = "Gibbs",
+  mc.cores = 6L,
+  verbose = TRUE,
+  control = list(seed = 100)
+)
+
+FindTopicsNumber_plot(result.2)
+```
+
+For Marriott, $3$ and $4$ looks like optimal choices. For Hilton, $3$ and $6$ looks like optimal choices.
+
+## 1. LDA Model Fitting
+
+Tunning Parameters:
+
+1.  Number of topics.
+2.  $\alpha$, the Dirichlet prior on the per-document topic distributions. It defines the prior weight of topic $k$ in a document.
+
+-   $\alpha$ is less than $1$, e.g. $0.1$, to prefer sparse topic distributions, i.e. few topics per document.
+
+3.  $\beta$, the prior on per-topic multinomial distribution over words. It defines the prior weight of word $w$ in a topic.
+
+-   $\beta$ is also less than $1$, e.g. $0.01$, to strongly prefer sparse word distributions, i.e. few words per topic.
+
+```{r, echo = TRUE}
+super.topic = function(matrix, number, alpha = NA, beta = NA){
+  return(textmodel_lda(matrix, k = number, alpha = alpha, beta = beta))
+} # Write as a Function Easy to Tune
+```
+
+### Marriott
+
+```{r, echo = TRUE}
+LDA.model.1.1 = super.topic(term.weighted.1, 3, 0.5, 0.5)
+# divergence(LDA.model.1.1)
+divergence(LDA.model.1.1)
+LDA.model.1.2 = super.topic(term.weighted.1, 4, 0.5, 0.5)
+divergence(LDA.model.1.2)
+terms(LDA.model.1.1, 20)
+terms(LDA.model.1.2, 20)
+```
+
+We can find out the terms that are most associate with the topics.
+
+One topic seems like "\~", such as \~.$*$
+
+One topic seems like "Room Equipment and Temperature", such as bedroom, bathroom, toilet, tub, floor, temperature, air, cold, heat, hot.
+
+One topic seems like "Airport Pick Up Service", such as shuttle, request, airport.
+
+One topic seems like "Food", such as food, restaurant, bar, location.
+
+```{r}
+pair.1 = data.frame(index = as.numeric(LDA.model.1.1$data@Dimnames$docs), label = topics(LDA.model.1.1)) %>% arrange(index)
+```
+
+### Hilton
+
+```{r, echo = TRUE}
+LDA.model.2.1 = super.topic(term.weighted.2, 3, 0.5, 0.5)
+LDA.model.2.2 = super.topic(term.weighted.2, 4, 0.5, 0.5)
+LDA.model.2.3 = super.topic(term.weighted.2, 5, 0.5, 0.5)
+terms(LDA.model.2.1, 20)
+terms(LDA.model.2.2, 20)
+terms(LDA.model.2.3, 20)
+```
+
+One topic seems like "Hotel Equipment", such as pool, lobby, tub, bed,lot.
+
+One topic seems like "Airport Pick Up Service", such as shuttle, flight, airport.
+
+```{r}
+pair.2 = data.frame(index = as.numeric(LDA.model.2.1$data@Dimnames$docs)) %>% arrange(index)
+```
+
+# Sentiment Analysis
+
+Each word was assigned to a sentiment score, I multiply its count to the corresponding sentiment score within a document and sum it up to get the total score of that document.
+
+Sentiment score package by AFINN from Finn Årup Nielsen.
+
+Reference: <http://www2.imm.dtu.dk/pubdb/pubs/6010-full.html>
+
+## Marriott
+
+```{r}
+emotion.1 = tidy(term.bag.1) %>% mutate(document = as.numeric(document))
+# Cast it Back
+
+score.1 = c()
+for (i in 1:nrow(pair.1)){
+  temp.1 = emotion.1 %>% filter(document == pair.1$index[i])
+  temp.1 = temp.1 %>% left_join(sentiment, by = "term") %>% replace(is.na(.), 0) %>% mutate(total = count * score)
+  score.1 = c(score.1, sum(temp.1$total))
+}
+
+pair.1 = pair.1 %>% cbind(score = score.1)
+pair.1$score = rescale(pair.1$score, to = c(-1, 1))
+head(pair.1, 50)
+```
+
+### Extraction
+
+```{r}
+topic.distribution.1 = as.data.frame(LDA.model.1.2$theta)
+topic.distribution.1 = topic.distribution.1[order(as.numeric(rownames(topic.distribution.1))), ]
+
+for(i in 1:nrow(topic.distribution.1)){
+  topic.distribution.1[i, ]= pair.1$score[1] * topic.distribution.1[i, ]
+}
+
+topic.distribution.1 = cbind(topic.distribution.1, index = pair.1$index)
+write.csv(topic.distribution.1, file = "Marriott_Sentiment.csv", row.names = FALSE)
+```
+
+## Hilton
+
+```{r}
+emotion.2 = tidy(term.bag.2) %>% mutate(document = as.numeric(document))
+# Cast it Back
+
+score.2 = c()
+for (i in 1:nrow(pair.2)){
+  temp.2 = emotion.2 %>% filter(document == pair.2$index[i])
+  temp.2 = temp.2 %>% left_join(sentiment, by = "term") %>% replace(is.na(.), 0) %>% mutate(total = count * score)
+  score.2 = c(score.2, sum(temp.2$total))
+}
+
+pair.2 = pair.2 %>% cbind(score = score.2)
+pair.2$score = rescale(pair.2$score, to = c(-1, 1))
+head(pair.2, 50)
+```
+
+### Extraction
+
+```{r}
+topic.distribution.2.1 = as.data.frame(LDA.model.2.1$theta)
+topic.distribution.2.1 = topic.distribution.2.1[order(as.numeric(rownames(topic.distribution.2.1))), ]
+
+for(i in 1:nrow(topic.distribution.2.1)){
+  topic.distribution.2.1[i, ]= pair.2$score[1] * topic.distribution.2.1[i, ]
+}
+
+topic.distribution.2.1 = cbind(topic.distribution.2.1, index = pair.2$index)
+write.csv(topic.distribution.2.1, file = "Hilton_Sentiment_2_1.csv", row.names = FALSE)
+
+topic.distribution.2.2 = as.data.frame(LDA.model.2.2$theta)
+topic.distribution.2.2 = topic.distribution.2.2[order(as.numeric(rownames(topic.distribution.2.2))), ]
+
+for(i in 1:nrow(topic.distribution.2.2)){
+  topic.distribution.2.2[i, ]= pair.2$score[1] * topic.distribution.2.2[i, ]
+}
+
+topic.distribution.2.2 = cbind(topic.distribution.2.2, index = pair.2$index)
+write.csv(topic.distribution.2.2, file = "Hilton_Sentiment_2_2.csv", row.names = FALSE)
+
+topic.distribution.2.3 = as.data.frame(LDA.model.2.3$theta)
+topic.distribution.2.3 = topic.distribution.2.3[order(as.numeric(rownames(topic.distribution.2.3))), ]
+
+for(i in 1:nrow(topic.distribution.2.3)){
+  topic.distribution.2.3[i, ]= pair.2$score[1] * topic.distribution.2.3[i, ]
+}
+
+topic.distribution.2.3 = cbind(topic.distribution.2.3, index = pair.2$index)
+write.csv(topic.distribution.2.3, file = "Hilton_Sentiment_2_3.csv", row.names = FALSE)
+```
+
+# Preserve Word Order
+
+This is a separate section. We will investigate through the method that can preserve the words order.
+
+## 1. Bi-Grams
+
+### Marriott
+
+```{r}
+gram.1 = book.1 %>% unnest_tokens(gram, comment, token = "ngrams", n = 2)
+
+gram.1 = gram.1 %>%
+  separate(gram, c("word.1", "word.2"), remove = TRUE, sep = " ")
+
+gram.1 = gram.1 %>%
+  filter(!word.1 %in% stopwords::stopwords("en", source = "snowball")) %>%
+  filter(!word.2 %in% stopwords::stopwords("en", source = "snowball"))
+# Remove the Stop Words
+
+gram.1 = gram.1 %>%
+  filter(is.na(as.numeric(word.1))) %>%
+  filter(is.na(as.numeric(word.2)))
+# Remove Numbers
+
+# Small Words
+# Upper and Lower
+
+gram.1 = gram.1 %>% count(word.1, word.2, sort = TRUE, name = "count")
+head(gram.1)
+```
+
+### Hilton
+
+```{r}
+gram.2 = book.2 %>% unnest_tokens(gram, comment, token = "ngrams", n = 2)
+
+gram.2 = gram.2 %>%
+  separate(gram, c("word.1", "word.2"), remove = TRUE, sep = " ")
+
+gram.2 = gram.2 %>%
+  filter(!word.1 %in% stopwords::stopwords("en", source = "snowball")) %>%
+  filter(!word.2 %in% stopwords::stopwords("en", source = "snowball"))
+# Remove the Stop Words
+
+gram.2 = gram.2 %>%
+  filter(is.na(as.numeric(word.1))) %>%
+  filter(is.na(as.numeric(word.2)))
+# Remove Numbers
+
+# Small Words
+# Upper and Lower
+
+gram.2 = gram.2 %>% count(word.1, word.2, sort = TRUE, name = "count")
+head(gram.2)
+```
+
+## 2. Visualizing a Network
+
+### Marriott
+
+```{r}
+gram.graph.1 = gram.1 %>%
+  filter(count > 5) %>%
+  # Get those that at least Appear 4 Times
+  graph_from_data_frame()
+  # Special Function that Convert into Graph-Friendly Object
+
+# First Graph
+ggraph(gram.graph.1, layout = "fr") +
+  geom_edge_link() +
+  geom_node_point() +
+  geom_node_text(aes(label = name), vjust = 0.5, hjust = 0.5, size = 4)
+
+# Second Graph
+arrow.1 = grid::arrow(type = "closed", length = unit(.15, "inches"))
+
+ggraph(gram.graph.1, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = count), show.legend = FALSE,
+                 arrow = arrow.1, end_cap = circle(.07, 'inches')) +
+  geom_node_point(color = "green", size = 5) +
+  geom_node_text(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+```
+
+### Hilton
+
+```{r}
+gram.graph.2 = gram.2 %>%
+  filter(count > 5) %>%
+  # Get those that at least Appear 4 Times
+  graph_from_data_frame()
+  # Special Function that Convert into Graph-Friendly Object
+
+# First Graph
+ggraph(gram.graph.2, layout = "fr") +
+  geom_edge_link() +
+  geom_node_point() +
+  geom_node_text(aes(label = name), vjust = 0.5, hjust = 0.5, size = 4)
+
+# Second Graph
+arrow.2 = grid::arrow(type = "closed", length = unit(.15, "inches"))
+
+ggraph(gram.graph.2, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = count), show.legend = FALSE,
+                 arrow = arrow.2, end_cap = circle(.07, 'inches')) +
+  geom_node_point(color = "green", size = 5) +
+  geom_node_text(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+```
+
+These links' transparency depends on how common or rare the bi-grams are. These arrows preserve the order of the words.
+
+# Model Construction
+
+## Categorization
+
+```{r}
+token.1 = colnames(test.1)
+token.2 = colnames(test.2)
+token.1 = paste(token.1, collapse = ' ')
+
+index.1 = c('Brand',
+            'Marriott Survey Type',
+            'Marsha Code',
+            'Market Code/Rate Plan',
+            'Market Segment',
+            'Room Types',
+            'Survey language',
+            'Loyalty Program Tier',
+            'Mobile Check-In',
+            'Other Amenity Description',
+            'Restaurant 1 Cuisine Type',
+            'Restaurant 2 Cuisine Type',
+            'Restaurant 3 Cuisine Type',
+            'Other Hotel Restaurant(s) Used',
+            'Bell Staff Problem Resolution',
+            'Bell Staff Problem - Number of People Contacted',
+            'Billing/Rates Problem Resolution',
+            'Billing/Rates Problem - Number of People Contacted',
+            'Broken Items Problem Resolution',
+            'Broken Items Problem - Number of People Contacted',
+            'Check-In Problem Resolution',
+            'Check-In Problem - Number of People Contacted',
+            'Check-Out Problem Resolution',
+            'Check-Out Problem - Number of People Contacted',
+            'Heating/Cooling Systems Problem Resolution',
+            'Heating/Cooling Systems Problem - Number of People Contacted',
+            'Hotel/Room Maintenance Problem Resolution',
+            'Hotel/Room Maintenance Problem - Number of People Contacted',
+            'Internet Connectivity Problem Resolution',
+            'Internet Connectivity Problem - Number of People Contacted',
+            'Noise Problem Resolution',
+            'Noise Problem - Number of People Contacted',
+            'Parking Problem Resolution',
+            'Parking Problem - Number of People Contacted',
+            'Recreation Facilities Problem Resolution',
+            'Recreation Facilities Problem - Number of People Contacted',
+            'Reservation Accuracy Problem Resolution',
+            'Reservation Accuracy Problem - Number of People Contacted',
+            'Loyalty Program Problem Resolution',
+            'Loyalty Program Problem - Number of People Contacted',
+            'Room Cleanliness/Housekeeping Problem Resolution',
+            'Room Cleanliness/Housekeeping Problem - Number of People Contacted',
+            'Room Location/Type Problem Resolution',
+            'Room Location/Type Problem - Number of People Contacted',
+            'Room Smell Problem Resolution',
+            'Room Smell Problem - Number of People Contacted',
+            'Staff Problem Resolution',
+            'Staff Problem - Number of People Contacted',
+            'TV/Remote Problem Resolution',
+            'TV/Remote Problem - Number of People Contacted',
+            'Bathroom Problem Resolution',
+            'Bathroom Problem  - Number of People Contacted',
+            'Other Problem Resolution',
+            'Other Problem - Number of People Contacted',
+            'F&B Quality Problem Resolution',
+            'F&B Quality Problem - Number of People Contacted',
+            'F&B Service Problem Resolution',
+            'F&B Service Problem - Number of People Contacted',
+            '(Inactive) Trip Purpose')
+
+index.2 = c('Brand',
+            'Hilton Honors Tier',
+            'Check-In Type',
+            'SRP Code',
+            'Survey Viewed on Mobile',
+            'Partial Survey',
+            'Purpose of Stay',
+            'Selection Reason',
+            'Make It Right Awareness',
+            'Mobile Opt In',
+            'Breakfast',
+            'Restaurant',
+            'Room Service',
+            'High Speed Internet',
+            'Fitness Center...49',
+            'Pool...52',
+            'Bar...54',
+            'Attended Meeting',
+            'None',
+            'Internet Tier',
+            'Problem Incidence',
+            'Reservation Accuracy',
+            'Check-In/Check-Out',
+            'Staff Interaction',
+            'Room Location/Type',
+            'Hotel/Room Smell',
+            'Room/Suite Cleanliness',
+            'Working Order of Bathroom',
+            'Heating/Cooling',
+            'Noise',
+            'Internet',
+            'Comfort of Bed',
+            'Hotel Amenities',
+            'Room Amenities',
+            'Hotel/Room Maintenance',
+            'Food and Beverage',
+            'Billing/Rates',
+            'Safety/Security',
+            'Parking',
+            'Hilton Honors Benefits...93',
+            'Gender',
+            'Age',
+            'Time of Week',
+            'Digital Key',
+            'Digital Key (Resolution)',
+            'Review Site')
+
+super.label = function(data, index, open){
+  temp = data[, index]
+
+  for(j in 1:ncol(temp)){
+    uniqueness = na.omit(unname(unlist(unique(temp[, j]))))
+    if(sum(is.na(temp[, j])) != 0){
+      temp[is.na(temp[, j]), j] = as.character(999)
+      output = "'NA' is 999, "
+    }
+    else{
+      output = ""
+    }
+
+    for(k in 1:length(uniqueness)){
+      temp[temp[, j] == uniqueness[k], j] = as.character(k)
+      if(k < length(uniqueness)){
+        output = paste0(output, sprintf("'%s' is %i", substr(uniqueness[k], 1, nchar(uniqueness[k]) - 1),
+                                        k), sep = ", ")
+      }
+      else{
+        output = paste0(output, sprintf("'%s' is %i", substr(uniqueness[k], 1, nchar(uniqueness[k]) - 1),
+                                        k), sep = ".")
+      }
+    }
+    if(open)
+      print(output)
+  }
+  return(temp)
+}
+
+# Sentiment
+test.1 = test.1[pair.1$index, ]
+test.1 = cbind(test.1, topic.distribution.1)
+
+test.1 = test.1 %>% filter(`Room Types` == "DBDB" | `Room Types` == "DLXK" | `Room Types` == "KING" | is.na(`Room Types`))
+
+label.1 = super.label(test.1, index.1, FALSE)
+label.2 = super.label(test.2, index.2, FALSE)
+
+label.1 = label.1 %>% mutate_if(is.character, as.factor)
+label.2 = label.2 %>% mutate_if(is.character, as.factor)
+```
+
+## Basic Cleaning
+
+```{r}
+super.replace = function(data, replacement, threshold, show){
+  index = c()
+  flag = 1
+  replacement = as.data.frame(replacement)
+  for(i in 1:ncol(data)){
+    if(colnames(data)[i] == colnames(replacement)[flag]){
+      if(show){
+        print(colnames(data)[i])
+        print(colnames(replacement)[flag])
+      }
+      if(length(levels(replacement[, flag])) <= threshold){
+        data[, i] = replacement[, flag]
+      }
+      else{
+        print(paste0("Drop: ", colnames(replacement)[flag]))
+        index = c(index, i)
+      }
+      flag = flag + 1
+    }
+    
+    if(flag > length(colnames(replacement))){
+      return(data)
+    } # Excessive Control
+  }
+}
+
+prepare.1 = super.replace(test.1, label.1, 1000, FALSE)
+prepare.2 = super.replace(test.2, label.2, 1000, FALSE)
+```
+
+```{r}
+super.quality = function(data){
+  percent = c()
+  output = c()
+  column = colnames(data) # Names of Data Columns
+  row = nrow(data) # Denominator of Percentage
+
+  # Loop to Check Number of NAs
+  for (i in 1:ncol(data)){
+    percent = c(percent, round(sum(is.na(data[, i])) / row, 4))
+    output = c(output, paste(paste(column[i],
+                                   percent[i] * 100,
+                                   sep = ": "), "%", sep = ""))
+  }
+  cat(sprintf("Average:%.2f \nMedian:%.2f \nMode:%.2f \n", mean(percent),
+              median(percent), Mode(percent)))
+  return(list(output, column, percent))
+}
+
+quality_1 = super.quality(test.1)
+quality_2 = super.quality(test.2)
+
+super.check = function(data, input, threshold, variable = NULL, out){
+  flag = 0
+  for(i in 1:length(input)){
+    if(input[i] > threshold){
+      if(!is.null(variable) & out){
+        print(variable[i])
+        print(input[i])
+      }
+      data = data[, -(i - flag)]
+      flag = flag + 1
+    }
+  }
+  return(data)
+}
+
+prepare.1 = super.check(prepare.1, quality_1[[3]], 0.5, quality_1[[2]], FALSE)
+prepare.2 = super.check(prepare.2, quality_2[[3]], 0.5, quality_2[[2]], FALSE)
+
+# write.csv(prepare.1, file = "Marriott_Whole_Data.csv", row.names = FALSE)
+# write.csv(prepare.2, file = "Hilton_Whole_Data.csv", row.names = FALSE)
+```
+
+```{r}
+construct = prepare.1 %>% select('Loyalty Program Tier', 'Anticipation of Needs', 'Mobile Check-In', 'Room Types', 'Check-In Experience', '(Inactive) Maintenance and Upkeep', 'Bathroom Overall', 'Room Overall', 'Public Spaces/Lobby Area', 'Internet', 'Staff Service Overall', 'Fitness Center', 'Lounge (Executive/Concierge/Club)', 'Intent to Consider Brand', '(Inactive) Gender', '(Inactive) Trip Purpose', 'Market Segment', 'topic1', 'topic2', 'topic3', 'topic4')
+colnames(construct) = c('Loyalty', 'Anticipation', 'Mobile', 'Types', 'Check', 'Maintenance', 'Bathroom', 'Overall', 'Public', 'Internet', 'Staff', 'Fitness', 'Lounge', 'Intent', 'Gender', 'Trip', 'Market', 'Topic_1', 'Topic_2', 'Topic_3', 'Topic_4')
+```
+
+```{r}
+construct = construct %>% dummy_cols(select_columns = c('Loyalty', 'Mobile', 'Types', 'Trip', 'Market'), remove_first_dummy = TRUE, remove_selected_columns = TRUE) %>% mutate(Internet = recode(Internet, "No" = 0, "Yes" = 1)) %>% mutate(Fitness = recode(Fitness, "No" = 0, "Yes" = 1)) %>% mutate(Lounge = recode(Lounge, "No" = 0, "Yes" = 1)) %>% mutate(Gender = recode(Gender, "Male" = 0, "Female" = 1))
+
+response = prepare.1 %>% select('(inactive)Overall Satisfaction')
+colnames(response) = "Overall_Satisfaction"
+
+construct = cbind(construct, response)
+
+construct = na.omit(construct)
+
+write.csv(construct, file = "Marriott_Construct.csv", row.names = FALSE)
+```
